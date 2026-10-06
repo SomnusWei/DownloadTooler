@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"default capability","local":true,"windows":["dy_main"],"permissions":["core:default","shell:allow-spawn","shell:allow-stdin-write","shell:allow-kill","shell:default"]}}

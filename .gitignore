@@ -1,0 +1,59 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.log
+
+# Node
+node_modules/
+
+# 本地数据 / 凭据（严禁提交）
+user_data/
+user_data_qt/
+.cache/
+github推送相关.txt
+cookies.json
+blogs.json
+Downloaded/
+.test_dl/
+.xhs_xh0/
+.xhs_xh0_out.json
+*.db
+*.sqlite
+# 下载/测试产生的媒体文件（体积大，不入库）
+*.mp4
+*.webp
+# 运行时生成（含个人抓取记录与含 token 的链接）
+history.json
+tasks.json
+
+# 本地配置（含个人下载目录）
+.settings.json
+settings.json
+
+# 构建产物
+build/
+dist/
+*.spec.old
+XHSCollector-v*.zip
+
+# Tauri 桌面端：运行时数据目录与生成的引擎二进制（体积大 / 含本地配置）
+tauri-app/patches/
+tauri-app/panel_data/
+tauri-app/dy_data/
+tauri-app/xhs_data/
+tauri-app/downloads/
+tauri-app/src-tauri/engines/
+
+# Rust / Tauri 构建产物
+target/
+tauri-poc/src-tauri/binaries/
+
+# IDE
+.trae/
+
+# 内部开发交接文档（如需公开再手动加回）
+开发.md
+
+# 参考项目源码（github 拉取研究用）
+douyin-downloader/

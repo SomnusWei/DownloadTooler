@@ -1,0 +1,47 @@
+﻿[ {
+   "description": "",
+   "devtoolsFrontendUrl": "https://aka.ms/docs-landing-page/serve_rev/@5af6e80f702cffe10645c6d6433668f011b739be/inspector.html?ws=127.0.0.1:9357/devtools/page/F68B6ACF0287833A99E6A1B79564D2D5",
+   "faviconUrl": "https://p-pc-weboff.byteimg.com/tos-cn-i-9r5gewecjs/favicon.png",
+   "id": "F68B6ACF0287833A99E6A1B79564D2D5",
+   "title": "抖音精选电脑版 - 抖音旗下优质视频平台",
+   "type": "page",
+   "url": "https://www.douyin.com/jingxuan",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9357/devtools/page/F68B6ACF0287833A99E6A1B79564D2D5"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://aka.ms/docs-landing-page/serve_rev/@5af6e80f702cffe10645c6d6433668f011b739be/inspector.html?ws=127.0.0.1:9357/devtools/page/7E80DB8465E7F50D4732C509833AB0CB",
+   "faviconUrl": "https://p-pc-weboff.byteimg.com/tos-cn-i-9r5gewecjs/favicon.png",
+   "id": "7E80DB8465E7F50D4732C509833AB0CB",
+   "parentId": "F68B6ACF0287833A99E6A1B79564D2D5",
+   "title": "https://lf-rc1.yhgfb-cn-static.com/obj/rc-verifycenter/rmc-nocaptcha/1.0.0.52/index.html",
+   "type": "iframe",
+   "url": "https://lf-rc1.yhgfb-cn-static.com/obj/rc-verifycenter/rmc-nocaptcha/1.0.0.52/index.html",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9357/devtools/page/7E80DB8465E7F50D4732C509833AB0CB"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://aka.ms/docs-landing-page/serve_rev/@5af6e80f702cffe10645c6d6433668f011b739be/worker_app.html?ws=127.0.0.1:9357/devtools/page/B05E7D99907D29B08BDC464DB5D95C91",
+   "id": "B05E7D99907D29B08BDC464DB5D95C91",
+   "title": "Service Worker https://www.douyin.com/sw.js",
+   "type": "service_worker",
+   "url": "https://www.douyin.com/sw.js",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9357/devtools/page/B05E7D99907D29B08BDC464DB5D95C91"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://aka.ms/docs-landing-page/serve_rev/@5af6e80f702cffe10645c6d6433668f011b739be/inspector.html?ws=127.0.0.1:9357/devtools/page/7D60B5FBFB4D19F98747707B4974232E",
+   "id": "7D60B5FBFB4D19F98747707B4974232E",
+   "parentId": "F68B6ACF0287833A99E6A1B79564D2D5",
+   "title": "webcodecs-flv-player-0.0.2-alpha.93-2026091001",
+   "type": "worker",
+   "url": "blob:https://www.douyin.com/c3a1a36f-b0f5-4d3e-9448-d95f1a2a1a5a",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9357/devtools/page/7D60B5FBFB4D19F98747707B4974232E"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://aka.ms/docs-landing-page/serve_rev/@5af6e80f702cffe10645c6d6433668f011b739be/inspector.html?ws=127.0.0.1:9357/devtools/page/327FA1498E6B5AB74E5B858D66E398C2",
+   "id": "327FA1498E6B5AB74E5B858D66E398C2",
+   "parentId": "F68B6ACF0287833A99E6A1B79564D2D5",
+   "title": "blob:https://www.douyin.com/876258d8-bc63-42d9-8749-ab9c21a3bbc1",
+   "type": "worker",
+   "url": "blob:https://www.douyin.com/876258d8-bc63-42d9-8749-ab9c21a3bbc1",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9357/devtools/page/327FA1498E6B5AB74E5B858D66E398C2"
+} ]
+

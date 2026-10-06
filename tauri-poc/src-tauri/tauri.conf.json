@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "tauri-poc",
+  "version": "0.1.0",
+  "identifier": "com.downloadtooler.tauri-poc",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Tauri POC - Dy",
+        "width": 1280,
+        "height": 800,
+        "url": "https://www.douyin.com",
+        "label": "dy_main"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": ["binaries/echo-sidecar"],
+    "icon": [
+      "icons/icon.png"
+    ]
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

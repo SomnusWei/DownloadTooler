@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Tauri POC</title>
+</head>
+<body>
+  <h1>Tauri POC</h1>
+  <p>WebView2 CDP POC - see console output</p>
+  <button id="poc3">POC-3: 测试 sidecar 行协议</button>
+  <pre id="result"></pre>
+  <script>
+    // 简单的 invoke 调用，POC-3 用
+    // 注意：这是 fallback 页面，实际窗口加载 https://www.douyin.com
+    document.getElementById('poc3').addEventListener('click', async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const result = await invoke('poc3_sidecar_echo');
+        document.getElementById('result').textContent = 'OK: ' + result;
+      } catch (e) {
+        document.getElementById('result').textContent = 'ERR: ' + e;
+      }
+    });
+  </script>
+</body>
+</html>

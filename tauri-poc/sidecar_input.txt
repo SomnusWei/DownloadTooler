@@ -1,0 +1,2 @@
+==DYC_BRIDGE_REQ== {"id":"test-001","url":"https://www.douyin.com/test"}
+exit
