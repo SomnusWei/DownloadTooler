@@ -75,6 +75,43 @@ fn ensure_dir(p: &PathBuf) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 快捷键切换语义：
+/// - 窗口未启动 → 启动
+/// - 已启动但未聚焦（含被最小化）→ 恢复并聚焦
+/// - 已聚焦 → 最小化
+pub async fn toggle_platform_window(
+    app: tauri::AppHandle,
+    platform: String,
+) -> Result<String, String> {
+    let label = match platform.as_str() {
+        "dy" => "dy_main",
+        "xhs" => "xhs_main",
+        _ => return Err(format!("未知 platform: {}", platform)),
+    };
+
+    if let Some(existing) = app.get_webview_window(label) {
+        let minimized = existing.is_minimized().unwrap_or(false);
+        let focused = existing.is_focused().unwrap_or(false);
+        if focused && !minimized {
+            existing
+                .minimize()
+                .map_err(|e| format!("最小化 {} 失败: {}", label, e))?;
+            return Ok(format!("{} 已最小化", label));
+        }
+        if minimized {
+            let _ = existing.unminimize();
+        }
+        let _ = existing.show();
+        existing
+            .set_focus()
+            .map_err(|e| format!("聚焦 {} 失败: {}", label, e))?;
+        return Ok(format!("{} 已聚焦", label));
+    }
+
+    // 窗口不存在（未启动或被关闭过）→ 走正常创建流程
+    open_platform_window(app, platform).await
+}
+
 /// 根据 platform 返回对应 CDP 端口
 pub fn cdp_port_for(platform: &str) -> Option<u16> {
     match platform {

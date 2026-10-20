@@ -148,9 +148,10 @@ pub(crate) fn register_platform_shortcut(
             let app = app_handle.clone();
             let p = p.clone();
             tauri::async_runtime::spawn(async move {
-                match windows::open_platform_window(app, p).await {
-                    Ok(msg) => println!("[tauri-app] 快捷键启动: {}", msg),
-                    Err(e) => eprintln!("[tauri-app] 快捷键启动失败: {}", e),
+                // toggle：未启动→启动；已启动未聚焦→聚焦；已聚焦→最小化
+                match windows::toggle_platform_window(app, p).await {
+                    Ok(msg) => println!("[tauri-app] 快捷键切换: {}", msg),
+                    Err(e) => eprintln!("[tauri-app] 快捷键切换失败: {}", e),
                 }
             });
         })
@@ -163,6 +164,16 @@ pub fn run() {
     let gs_plugin = GsBuilder::new().build();
 
     tauri::Builder::default()
+        // 单实例：再次双击 exe 时新进程立即退出，改为激活已有实例的控制面板。
+        // 注意：该插件必须第一个注册，否则无法拦截第二个进程。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            println!("[tauri-app] 检测到第二实例启动请求 → 激活已有控制面板");
+            if let Some(w) = app.get_webview_window("panel_main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(gs_plugin)
