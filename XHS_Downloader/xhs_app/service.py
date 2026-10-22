@@ -12,6 +12,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 
 from curl_cffi import requests as creq
 
@@ -411,8 +412,36 @@ def fetch_detail_http(cookie: str, note):
     raise AppError(f"HTTP 获取详情失败（可能需登录或被风控）：{last}")
 
 
-def run_download_task(task: TaskItem, cookie: str, log=None):
+def _img_key(url: str) -> str:
+    """图片唯一标识：取路径最后一段，并去掉 CDN 变换后缀（`~` / `!` 之后）。
+
+    详情接口与页面显示用的图片通常不同尺寸后缀（`!nd_dft_...`），但资源哈希一致。
+    """
+    try:
+        path = urlsplit(url or "").path or ""
+    except Exception:
+        path = url or ""
+    seg = path.rsplit("/", 1)[-1]
+    for ch in ("~", "!"):
+        if ch in seg:
+            seg = seg.split(ch, 1)[0]
+    return seg.lower()
+
+
+def _match_image_index(urls, srcs) -> int:
+    """用页面可见图片 URL 候选（按面积降序）匹配图集序号（1-based）；匹配不到返回 0。"""
+    keys = {_img_key(u): i for i, u in enumerate(urls, 1) if _img_key(u)}
+    for s in srcs or []:
+        k = _img_key(s)
+        if k and k in keys:
+            return keys[k]
+    return 0
+
+
+def run_download_task(task: TaskItem, cookie: str, log=None, image_srcs=None):
     """执行单个下载任务（纯 HTTP，不含可见浏览器）。返回 (state, msg)。
+
+    `image_srcs` 为页面可见图片 URL 候选：给出时只下载匹配到的那一张（单图下载用）。
 
     登录失效时抛 LoginRequired，由队列引擎统一暂停调度。
     """
@@ -430,13 +459,28 @@ def run_download_task(task: TaskItem, cookie: str, log=None):
         return FAILED, f"内部错误：{type(e).__name__}: {e}"
 
     folder = build_target(meta, note, target_dir)
+    pick = 0
     if fd["kind"] == "image":
         total = len(fd["urls"])
         width = max(2, len(str(total)))
         tasks = [(u, folder, f"{i:0{width}d}", f"图 {i}/{total}")
                  for i, u in enumerate(fd["urls"], 1)]
+        if image_srcs:
+            pick = _match_image_index(fd["urls"], image_srcs)
+            if pick <= 0:
+                msg = "未能匹配当前显示的图片（详情图片列表与页面图片 URL 不一致）"
+                if log:
+                    log(f"[{note.note_id}] {msg}")
+                return FAILED, msg
+            if log:
+                log(f"[{note.note_id}] 页面图片匹配为第 {pick}/{total} 张")
+            tasks = [tasks[pick - 1]]
         label = "张图"
     else:
+        if image_srcs:
+            if log:
+                log(f"[{note.note_id}] 当前笔记是视频，单图下载不适用")
+            return FAILED, "当前笔记是视频，单图下载不适用"
         tasks = [(fd["urls"][0], folder, "视频", "视频")]
         label = "视频"
 
@@ -466,9 +510,11 @@ def run_download_task(task: TaskItem, cookie: str, log=None):
         return FAILED, f"失败 {fail_n}/{len(tasks)} 个文件"
     if new_n == 0:
         return SKIPPED, "文件已存在，自动跳过"
+    msg = (f"完成第 {pick} 张图" if pick > 0
+           else f"完成 {new_n} 个{label}")
     if log:
-        log(f"[{note.note_id}] 完成 {new_n} 个{label}")
-    return DONE, f"完成 {new_n} 个{label}"
+        log(f"[{note.note_id}] {msg}")
+    return DONE, msg
 
 
 class DownloadQueue:

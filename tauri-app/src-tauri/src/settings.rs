@@ -4,6 +4,7 @@
 //! - download_dir: XHS / DY 共用的下载目录
 //! - shortcuts: 窗口启动/聚焦全局快捷键（dy / xhs 各自独立绑定）
 //! - download_shortcut: 下载快捷键（窗口内生效，默认 Ctrl+D）
+//! - image_shortcut: 单图下载快捷键（窗口内生效，默认 Alt+D）
 //! - dy_quality: 抖音清晰度档位（"" = 最高）
 //!
 //! 文件位置：panel_data/settings.json（与控制面板 WebView2 共用 UserDataFolder 父目录）
@@ -25,6 +26,10 @@ pub struct Settings {
     /// 下载快捷键（仅平台窗口聚焦时生效；空字符串 = 禁用）
     #[serde(default = "default_download_shortcut")]
     pub download_shortcut: String,
+
+    /// 单图下载快捷键：只下载图集当前显示的那一张（窗口聚焦时生效；空字符串 = 禁用）
+    #[serde(default = "default_image_shortcut")]
+    pub image_shortcut: String,
 
     /// 抖音清晰度档位："" = 最高，或 "1080" / "720" / "540"
     #[serde(default)]
@@ -56,12 +61,18 @@ fn default_download_shortcut() -> String {
     "Ctrl+D".into()
 }
 
+/// 单图下载快捷键默认值
+fn default_image_shortcut() -> String {
+    "Alt+D".into()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             download_dir: String::new(),
             shortcuts: Shortcuts::default(),
             download_shortcut: default_download_shortcut(),
+            image_shortcut: default_image_shortcut(),
             dy_quality: String::new(),
         }
     }
@@ -169,7 +180,7 @@ pub async fn set_shortcut(
 
 /// 设置下载快捷键（空字符串 = 禁用）
 ///
-/// 该快捷键**仅在平台窗口聚焦时**注册（见 lib.rs 的 `refresh_download_shortcut`），
+/// 该快捷键**仅在平台窗口聚焦时**注册（见 lib.rs 的 `refresh_focus_shortcuts`），
 /// 保存后按当前聚焦状态立即重注册。
 #[tauri::command]
 pub async fn set_download_shortcut(
@@ -179,7 +190,20 @@ pub async fn set_download_shortcut(
     let mut s = load();
     s.download_shortcut = shortcut;
     save(&s)?;
-    crate::refresh_download_shortcut(&app);
+    crate::refresh_focus_shortcuts(&app);
+    Ok(s)
+}
+
+/// 设置单图下载快捷键（空字符串 = 禁用）；同样只在平台窗口聚焦时注册
+#[tauri::command]
+pub async fn set_image_shortcut(
+    app: tauri::AppHandle,
+    shortcut: String,
+) -> Result<Settings, String> {
+    let mut s = load();
+    s.image_shortcut = shortcut;
+    save(&s)?;
+    crate::refresh_focus_shortcuts(&app);
     Ok(s)
 }
 

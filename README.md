@@ -2,7 +2,7 @@
 
 个人自用的 Windows 桌面下载工具（**Tauri 2.0** 单一应用）：内置**原生站点窗口**浏览抖音 / 小红书，在**窗口内按快捷键**即可下载**当前正在看的作品 / 笔记**，用于备份自己收藏或已获授权的公开内容。
 
-> v0.3.0 起桌面端由 Electron 迁移到 Tauri 2.0，**不再提供 Vue 面板**：平台窗口就是完整站点页面，交互只剩一个下载快捷键。
+> v0.3.0 起桌面端由 Electron 迁移到 Tauri 2.0，**不再提供 Vue 面板**：平台窗口就是完整站点页面，交互只剩下载快捷键（`Ctrl+D` 全量 / `Alt+D` 单图）与一个配置中心窗口。
 
 ## 功能一览
 
@@ -11,6 +11,7 @@
 | 单应用启动 | 启动只有「配置中心」一个窗口（4 标签：启动 / 登录态 / 设置 / 日志） |
 | 按需拉起平台窗口 | 点击按钮打开 `dy_main` / `xhs_main`；已打开则聚焦，不重复创建 |
 | **窗口内下载快捷键** | 默认 `Ctrl+D`：下载**当前显示**的作品 / 笔记；仅在对应窗口聚焦时生效，不影响其他应用的 Ctrl+D |
+| **窗口内单图下载快捷键** | 默认 `Alt+D`：只下载**图集里当前显示的那一张**（视频笔记或非图集页面会提示不适用）；同样仅在平台窗口聚焦时生效 |
 | 窗口切换快捷键 | 默认 `Alt+1` 抖音 / `Alt+2` 小红书（系统级，托盘状态下也生效）：未启动→启动；已启动未聚焦→聚焦；已聚焦→最小化 |
 | 抖音下载 | **视频**（无水印，清晰度可选 `最高 / 1080P / 720P / 540P`）与 **图集/图文**（无水印原图按序落盘） |
 | 小红书下载 | 笔记 **原图 / 视频**（固定最高清晰度） |
@@ -42,7 +43,8 @@
 - **page_bridge（抖音 Argus 兜底）**：抖音对详情接口启用 Argus 风控，非页面请求即使签名与 Cookie 正确也会 `403`。引擎直连失败时通过 stdout/stdin 行协议（`==DYC_BRIDGE_REQ==` / `==DYC_BRIDGE_RES==`）把请求交给 Tauri 主进程，在**已登录的 dy_main 内以同源 fetch** 执行。
 - **抖音当前作品识别**：前台多用 **modal 弹窗**展示作品（URL 只有 `modal_id`），因此不能只看 URL —— 采用**视口中心 DOM 探测**（元素上溯 14 层找作品链接或 `data-*` 里的长数字 id），URL 仅作兜底。
 - **小红书必须带 `xsec_token`**：解析笔记 SSR 依赖当前页 URL 的 `xsec_token`，故传参保留完整查询串。
-- **窗口内快捷键的实现**：只依赖聚焦状态 —— 平台窗口获得焦点时注册 `Ctrl+D`，失焦即注销（Tauri v2 默认禁止远程站点页面调用 IPC，故不走页面内注入）。
+- **单图识别（`Alt+D`）**：抖音 / 小红书的图集容器结构完全不同且经常变动，因此**不在 DOM 里数序号** —— 用 `elementFromPoint` 取**最顶层可见图片**的 URL 候选（按面积降序，最多 6 个），交给引擎与作品详情图片列表做**资源哈希匹配**（忽略 CDN 域名与 `~` / `!` 缩放后缀），命中后只下载那一张（`--image-src`）。
+- **窗口内快捷键的实现**：只依赖聚焦状态 —— 平台窗口获得焦点时注册 `Ctrl+D` / `Alt+D`，失焦即注销（Tauri v2 默认禁止远程站点页面调用 IPC，故不走页面内注入）。
 - **CDP 端口隔离**：dy_main / xhs_main 各自独立 `UserDataFolder` 与 `--remote-debugging-port`，两平台可**并发下载**互不干扰。
 
 ## 目录结构
@@ -106,8 +108,8 @@ powershell -ExecutionPolicy Bypass -File tools\build_release.ps1 -Version 0.3.0
 | 形态 | 路径 | 体积 |
 | --- | --- | --- |
 | MSI 安装包 | `src-tauri/target/release/bundle/msi/` | ~23 MB |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/` | ~18 MB |
-| 便携包 | `build/release/DownloadTooler-v<版本>-portable.zip` | ~23 MB |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/` | ~17 MB |
+| 便携包 | `build/release/DownloadTooler-v<版本>-portable.zip` | ~31 MB（解压后 ~63 MB） |
 
 便携版解压后运行 `DownloadTooler.exe`，需与 `engines/` 同目录。
 

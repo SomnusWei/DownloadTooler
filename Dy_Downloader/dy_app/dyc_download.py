@@ -12,6 +12,7 @@ import json
 import re
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -134,12 +135,40 @@ def _kind_from_url(url):
     return "video" if m.group(1) == "video" else "images"
 
 
+def _img_key(url: str) -> str:
+    """图片唯一标识：取路径最后一段，并去掉 CDN 变换后缀（`~` / `!` 之后）。
+
+    接口下发的原图与页面实际显示的图通常不同域名、不同缩放后缀，但资源哈希一致。
+    """
+    try:
+        path = urllib.parse.urlsplit(url or "").path or ""
+    except Exception:
+        path = url or ""
+    seg = path.rsplit("/", 1)[-1]
+    for ch in ("~", "!"):
+        if ch in seg:
+            seg = seg.split(ch, 1)[0]
+    return seg.lower()
+
+
+def _match_image_index(medias, srcs):
+    """用页面可见图片 URL 候选（按面积降序）匹配图集序号（1-based）；匹配不到返回 0。"""
+    keys = {_img_key(u): i for i, (u, _ext) in enumerate(medias, 1) if _img_key(u)}
+    for s in srcs or []:
+        k = _img_key(s)
+        if k and k in keys:
+            return keys[k]
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=False)
     ap.add_argument("--dir", default="")
     ap.add_argument("--quality", default="", help="期望清晰度(如1080)，空=最高")
     ap.add_argument("--cookies-file", default="", help="cookies.json 路径(默认 config.COOKIES_FILE)")
+    ap.add_argument("--image-src", action="append", default=[],
+                    help="当前页面显示的图片 URL 候选（可重复）；给出时只下载匹配到的那一张")
     args = ap.parse_args()
 
     cpath = Path(args.cookies_file) if args.cookies_file else None
@@ -191,8 +220,20 @@ def main() -> int:
 
     if meta["type"] == "images":
         total = len(medias)
+        picks = list(enumerate(medias, 1))
+        pick = 0
+        if args.image_src:
+            pick = _match_image_index(medias, args.image_src)
+            if pick <= 0:
+                msg = "未能匹配当前显示的图片（详情图片列表与页面图片 URL 不一致）"
+                out(f"[dl] {msg}")
+                print(json.dumps({"ok": False, "type": "images", "err": msg,
+                                  "folder": str(folder)}, ensure_ascii=False), flush=True)
+                return 9
+            out(f"[dl] 页面图片匹配为第 {pick}/{total} 张")
+            picks = [(pick, medias[pick - 1])]
         files = []
-        for i, (u, ext) in enumerate(medias, 1):
+        for i, (u, ext) in picks:
             name = folder / f"{i:02d}.{ext}"
             try:
                 size = dl_img(u, name)
@@ -209,9 +250,19 @@ def main() -> int:
                    "title": meta["title"], "author": meta["author"],
                    "folder": str(folder), "files": files,
                    "total_bytes": sum(f["bytes"] for f in files)}
+        if pick:
+            payload["image_index"] = pick
+            payload["image_total"] = total
         out(f"完成: {len(files)} 张图片 → {folder}")
         print("\n==DYC_JSON==\n" + json.dumps(payload, ensure_ascii=False), flush=True)
         return 0
+
+    if args.image_src:
+        msg = "当前作品不是图集，单图下载不适用"
+        out(f"[dl] {msg}")
+        print(json.dumps({"ok": False, "err": msg, "folder": str(folder)},
+                         ensure_ascii=False), flush=True)
+        return 9
 
     files = []
     name = folder / "视频.mp4"

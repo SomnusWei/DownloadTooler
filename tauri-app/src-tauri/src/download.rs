@@ -155,6 +155,49 @@ const DY_RESOLVE_JS: &str = r#"(function(){
   return url;
 })()"#;
 
+/// 页面「当前正在显示（最顶层可见）的图片 URL 候选」DOM 探测 JS（抖音 / 小红书共用）
+///
+/// 只回传图片 src，不在页面里推断序号：图集容器结构两站完全不同且会变，
+/// 序号交给 Python 引擎用「作品详情里的图片 URL 列表」做路径匹配，稳定得多。
+///
+/// 「可见」用 elementFromPoint 命中测试判定：`getBoundingClientRect` 不感知遮挡，
+/// 图集弹窗打开时底层的 feed 大图依然占满视口，必须排除。
+const DOM_VISIBLE_IMAGE_JS: &str = r#"(function(){
+  var vp = window.innerWidth * window.innerHeight;
+  function vis(r){
+    if(!r) return 0;
+    var w = Math.min(r.right, window.innerWidth) - Math.max(r.left, 0);
+    var h = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0);
+    return (w > 0 && h > 0) ? w * h : 0;
+  }
+  function onTop(el, r){
+    var cx = Math.max(0, Math.min(window.innerWidth - 1, r.left + r.width / 2));
+    var cy = Math.max(0, Math.min(window.innerHeight - 1, r.top + r.height / 2));
+    var hit = document.elementFromPoint(cx, cy);
+    if(!hit) return false;
+    if(hit === el || el.contains(hit)) return true;
+    // 轮播通常给图片盖一层透明层或同容器包裹
+    return !!(hit.parentElement && hit.parentElement.contains(el));
+  }
+  var list = [], imgs = document.images || [];
+  for(var i = 0; i < imgs.length; i++){
+    var im = imgs[i];
+    var s = im.currentSrc || im.src || '';
+    if(s.indexOf('http') !== 0) continue;
+    var r = im.getBoundingClientRect();
+    var a = vis(r);
+    if(a < vp * 0.05) continue;
+    if(!onTop(im, r)) continue;
+    list.push({src: s, area: a});
+  }
+  list.sort(function(x, y){ return y.area - x.area; });
+  var out = [];
+  for(var j = 0; j < list.length && out.length < 6; j++){
+    if(out.indexOf(list[j].src) < 0) out.push(list[j].src);
+  }
+  return {srcs: out};
+})()"#;
+
 /// 解析抖音图集的文件级进度行：`  图片 3/9: 01.jpg (123456 字节)` → `(3, 9)`
 ///
 /// 图集不做百分比（与小红书保持一致的用户体验），按「图 N/总数」推进。
@@ -165,14 +208,17 @@ fn parse_dy_image_progress(line: &str) -> Option<(u32, u32)> {
     Some((cur.trim().parse().ok()?, total.parse().ok()?))
 }
 
-/// 抖音下载：`dyc-download --url <作品> --dir <下载目录> --cookies-file <cookies.json> [--quality <档位>]`
+/// 抖音下载：`dyc-download --url <作品> --dir <下载目录> --cookies-file <cookies.json> [--quality <档位>] [--image-src URL]...`
 ///
 /// 下载过程中把状态推送到 dy_main 右下角 toast（开始 / 进度 / 完成 / 失败）。
+/// `image_srcs` 为 `Some(候选URL)` 时只下载匹配到的那一张（单图快捷键）：
+/// 序号由引擎用作品详情图片列表与这些 URL 做路径匹配得出。
 async fn download_dy(
     app: &AppHandle,
     port: u16,
     engine_url: &str,
     origin_url: &str,
+    image_srcs: Option<Vec<String>>,
 ) -> Result<Value, String> {
     let s = settings::load();
     let dir = settings::download_dir();
@@ -191,6 +237,12 @@ async fn download_dy(
         args.push("--quality".into());
         args.push(s.dy_quality.clone());
     }
+    if let Some(srcs) = &image_srcs {
+        for src in srcs {
+            args.push("--image-src".into());
+            args.push(src.clone());
+        }
+    }
 
     let quality_txt = if s.dy_quality.is_empty() {
         "最高".to_string()
@@ -201,11 +253,25 @@ async fn download_dy(
         app,
         "dy",
         format!(
-            "开始下载：{}（清晰度 {}）\n          来源页：{}",
-            engine_url, quality_txt, origin_url
+            "开始下载：{}（{}）\n          来源页：{}",
+            engine_url,
+            match &image_srcs {
+                Some(srcs) => format!("当前图片（{} 个候选）", srcs.len()),
+                None => format!("清晰度 {}", quality_txt),
+            },
+            origin_url
         ),
     );
-    toast::push(port, "dy", "start", &format!("开始下载（{}）", quality_txt)).await;
+    toast::push(
+        port,
+        "dy",
+        "start",
+        &match &image_srcs {
+            Some(_) => "开始下载（当前图片）".to_string(),
+            None => format!("开始下载（{}）", quality_txt),
+        },
+    )
+    .await;
 
     // 进度回调：
     // - 图集：按「图片 N/总数」文件级推进（与小红书体验一致），不再报百分比
@@ -254,7 +320,15 @@ async fn download_dy(
                 let kind_txt = if kind == "images" { "图集" } else { "视频" };
                 let folder = v.get("folder").and_then(|f| f.as_str()).unwrap_or("");
                 sidecar::emit_panel_log(app, "dy", format!("下载完成（{}）→ {}", kind, folder));
-                toast::push(port, "dy", "done", &format!("下载完成（{}）", kind_txt)).await;
+                let done_txt = if image_srcs.is_some() {
+                    match v.get("image_index").and_then(|x| x.as_u64()) {
+                        Some(n) => format!("下载完成（图 {}）", n),
+                        None => "下载完成（当前图片）".to_string(),
+                    }
+                } else {
+                    format!("下载完成（{}）", kind_txt)
+                };
+                toast::push(port, "dy", "done", &done_txt).await;
             } else {
                 let why = v
                     .get("err")
@@ -272,8 +346,35 @@ async fn download_dy(
     res
 }
 
+/// 读取页面当前正在显示（最顶层）的图片 URL 候选（按可见面积降序）
+///
+/// 不在页面里推断序号：序号由引擎拿详情图片列表做 URL 路径匹配得出。
+async fn visible_image_srcs(port: u16, platform: &str) -> Result<Vec<String>, String> {
+    let v = cookies::cdp_eval_js(port, platform, DOM_VISIBLE_IMAGE_JS)
+        .await
+        .map_err(|e| format!("读取当前图片失败（窗口未打开或 CDP 不可达）: {}", e))?;
+    let srcs: Vec<String> = v
+        .get("srcs")
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if srcs.is_empty() {
+        return Err(
+            "未能识别当前显示的图片（请确认已打开图集，并把目标图片停在窗口内）".to_string(),
+        );
+    }
+    Ok(srcs)
+}
+
 /// 抖音：页面 DOM 探测当前作品 → 归一化 → 起引擎
-async fn download_current_dy(app: &AppHandle) -> Result<Value, String> {
+async fn download_current_dy(
+    app: &AppHandle,
+    image_srcs: Option<Vec<String>>,
+) -> Result<Value, String> {
     let port = windows::cdp_port_for("dy")
         .ok_or_else(|| "dy CDP 端口未配置".to_string())?;
 
@@ -298,10 +399,36 @@ async fn download_current_dy(app: &AppHandle) -> Result<Value, String> {
         return Err(msg);
     };
 
-    let id = engine_url.rsplit('/').next().unwrap_or("").to_string();
-    toast::push(port, "dy", "queued", &format!("已加入下载：{}", id)).await;
+    match &image_srcs {
+        Some(_) => toast::push(port, "dy", "queued", "已加入下载：当前图片").await,
+        None => {
+            let id = engine_url.rsplit('/').next().unwrap_or("").to_string();
+            toast::push(port, "dy", "queued", &format!("已加入下载：{}", id)).await;
+        }
+    }
 
-    download_dy(app, port, &engine_url, &resolved).await
+    download_dy(app, port, &engine_url, &resolved, image_srcs).await
+}
+
+/// 抖音单图：探测作品地址 + 当前可见图片 URL → 引擎按 URL 匹配序号后只下这一张
+async fn download_current_image_dy(app: &AppHandle) -> Result<Value, String> {
+    let port = windows::cdp_port_for("dy")
+        .ok_or_else(|| "dy CDP 端口未配置".to_string())?;
+    match visible_image_srcs(port, "dy").await {
+        Ok(srcs) => {
+            sidecar::emit_panel_log(
+                app,
+                "dy",
+                format!("单图下载：识别到 {} 个可见图片候选", srcs.len()),
+            );
+            download_current_dy(app, Some(srcs)).await
+        }
+        Err(e) => {
+            sidecar::emit_panel_log(app, "dy", &e);
+            toast::push(port, "dy", "failed", &e).await;
+            Err(e)
+        }
+    }
 }
 
 /// 小红书：当前页 URL（须保留 xsec_token）→ `xhs-note` 解析 → `xhs-download` 下载
@@ -311,7 +438,13 @@ async fn download_current_dy(app: &AppHandle) -> Result<Value, String> {
 /// - 解析与下载是两个引擎：`note_one.py` 挂 CDP 9361 解析当前笔记，
 ///   `download_one.py` 纯 HTTP + 本地 `cookies.json` 下载
 /// - 落盘结构为 `下载目录/作者/标题_<noteId>/`（沿用 XHS 原子项目）
-async fn download_current_xhs(app: &AppHandle) -> Result<Value, String> {
+///
+/// `image_srcs` 为 `Some(候选URL)` 时只下载匹配到的那一张（单图快捷键）：
+/// 序号由引擎用笔记详情图片列表与这些 URL 做路径匹配得出。
+async fn download_current_xhs(
+    app: &AppHandle,
+    image_srcs: Option<Vec<String>>,
+) -> Result<Value, String> {
     let port = windows::cdp_port_for("xhs")
         .ok_or_else(|| "xhs CDP 端口未配置".to_string())?;
 
@@ -350,7 +483,10 @@ async fn download_current_xhs(app: &AppHandle) -> Result<Value, String> {
         .unwrap_or("")
         .to_string();
     let id_txt = if note_id.is_empty() { "笔记".to_string() } else { note_id.clone() };
-    toast::push(port, "xhs", "queued", &format!("已加入下载：{}", id_txt)).await;
+    match &image_srcs {
+        Some(_) => toast::push(port, "xhs", "queued", "已加入下载：当前图片").await,
+        None => toast::push(port, "xhs", "queued", &format!("已加入下载：{}", id_txt)).await,
+    }
 
     // ② 写临时 note-json（download_one 的入参格式：{meta, note}）
     let tmp = std::env::temp_dir().join(format!("dt-xhs-note-{}.json", id_txt));
@@ -362,20 +498,42 @@ async fn download_current_xhs(app: &AppHandle) -> Result<Value, String> {
 
     let dir = settings::download_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let dl_args = vec![
+    let mut dl_args = vec![
         "--note-json".to_string(),
         tmp.to_string_lossy().to_string(),
         "--dir".to_string(),
         dir.to_string_lossy().to_string(),
     ];
+    if let Some(srcs) = &image_srcs {
+        for src in srcs {
+            dl_args.push("--image-src".to_string());
+            dl_args.push(src.clone());
+        }
+    }
 
     let title_txt = if title.is_empty() { id_txt.clone() } else { title.clone() };
     sidecar::emit_panel_log(
         app,
         "xhs",
-        format!("开始下载：{}（最高清晰度）", title_txt),
+        format!(
+            "开始下载：{}（{}）",
+            title_txt,
+            match &image_srcs {
+                Some(srcs) => format!("当前图片（{} 个候选）", srcs.len()),
+                None => "最高清晰度".to_string(),
+            }
+        ),
     );
-    toast::push(port, "xhs", "start", "开始下载（最高清晰度）").await;
+    toast::push(
+        port,
+        "xhs",
+        "start",
+        &match &image_srcs {
+            Some(_) => "开始下载（当前图片）".to_string(),
+            None => "开始下载（最高清晰度）".to_string(),
+        },
+    )
+    .await;
 
     // ③ 下载（纯 HTTP + 本地 cookies.json）
     //
@@ -410,7 +568,15 @@ async fn download_current_xhs(app: &AppHandle) -> Result<Value, String> {
                     "xhs",
                     format!("下载完成（{}）→ {}", state, dir.display()),
                 );
-                toast::push(port, "xhs", "done", "下载完成（笔记）").await;
+                let done_txt = if image_srcs.is_some() {
+                    match v.get("image_index").and_then(|x| x.as_u64()) {
+                        Some(n) => format!("下载完成（图 {}）", n),
+                        None => "下载完成（当前图片）".to_string(),
+                    }
+                } else {
+                    "下载完成（笔记）".to_string()
+                };
+                toast::push(port, "xhs", "done", &done_txt).await;
             } else {
                 let why = v
                     .get("msg")
@@ -429,14 +595,45 @@ async fn download_current_xhs(app: &AppHandle) -> Result<Value, String> {
     res
 }
 
+/// 小红书单图：探测当前可见图片 URL → 解析笔记 → 引擎按 URL 匹配后只下这一张
+async fn download_current_image_xhs(app: &AppHandle) -> Result<Value, String> {
+    let port = windows::cdp_port_for("xhs")
+        .ok_or_else(|| "xhs CDP 端口未配置".to_string())?;
+    match visible_image_srcs(port, "xhs").await {
+        Ok(srcs) => {
+            sidecar::emit_panel_log(
+                app,
+                "xhs",
+                format!("单图下载：识别到 {} 个可见图片候选", srcs.len()),
+            );
+            download_current_xhs(app, Some(srcs)).await
+        }
+        Err(e) => {
+            sidecar::emit_panel_log(app, "xhs", &e);
+            toast::push(port, "xhs", "failed", &e).await;
+            Err(e)
+        }
+    }
+}
+
 /// 下载当前窗口显示的作品 / 笔记（快捷键触发）
 ///
 /// 返回引擎结果 JSON；同时把日志打到【日志】标签。
 #[tauri::command]
 pub async fn download_current(app: AppHandle, platform: String) -> Result<Value, String> {
     match platform.as_str() {
-        "dy" => download_current_dy(&app).await,
-        "xhs" => download_current_xhs(&app).await,
+        "dy" => download_current_dy(&app, None).await,
+        "xhs" => download_current_xhs(&app, None).await,
+        _ => Err(format!("未知 platform: {}", platform)),
+    }
+}
+
+/// 下载图集当前显示的那一张图（单图快捷键触发，默认 Alt+D）
+#[tauri::command]
+pub async fn download_current_image(app: AppHandle, platform: String) -> Result<Value, String> {
+    match platform.as_str() {
+        "dy" => download_current_image_dy(&app).await,
+        "xhs" => download_current_image_xhs(&app).await,
         _ => Err(format!("未知 platform: {}", platform)),
     }
 }

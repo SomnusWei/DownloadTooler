@@ -31,11 +31,39 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_global_shortcut::{Builder as GsBuilder, GlobalShortcutExt, ShortcutState};
 
-/// 当前已注册的「下载快捷键」：(快捷键字符串, 平台)
+/// 窗口聚焦域内的快捷键种类
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FocusShortcutKind {
+    /// 下载快捷键（默认 Ctrl+D）：下载当前作品 / 笔记的全部内容
+    Download,
+    /// 单图快捷键（默认 Alt+D）：只下载图集里当前显示的那一张
+    Image,
+}
+
+impl FocusShortcutKind {
+    fn label(self) -> &'static str {
+        match self {
+            FocusShortcutKind::Download => "下载",
+            FocusShortcutKind::Image => "单图下载",
+        }
+    }
+}
+
+/// 快捷键槽位：(快捷键字符串, 平台)
 ///
-/// 该快捷键**只在平台窗口聚焦时**注册、失焦即注销 —— 语义等价「窗口内生效」，
+/// 这些快捷键**只在平台窗口聚焦时**注册、失焦即注销 —— 语义等价「窗口内生效」，
 /// 且不会拦截用户在其他应用按 Ctrl+D（如浏览器加书签）。
-static DOWNLOAD_SHORTCUT: Mutex<Option<(String, String)>> = Mutex::new(None);
+type ShortcutSlot = Mutex<Option<(String, String)>>;
+
+static DOWNLOAD_SHORTCUT: ShortcutSlot = Mutex::new(None);
+static IMAGE_SHORTCUT: ShortcutSlot = Mutex::new(None);
+
+fn slot(kind: FocusShortcutKind) -> &'static ShortcutSlot {
+    match kind {
+        FocusShortcutKind::Download => &DOWNLOAD_SHORTCUT,
+        FocusShortcutKind::Image => &IMAGE_SHORTCUT,
+    }
+}
 
 /// 找出当前处于聚焦状态的平台窗口
 fn focused_platform(app: &tauri::AppHandle) -> Option<&'static str> {
@@ -49,8 +77,13 @@ fn focused_platform(app: &tauri::AppHandle) -> Option<&'static str> {
     None
 }
 
-/// 注册下载快捷键（绑定到指定平台的 `download_current`）
-fn register_download_shortcut(app: &tauri::AppHandle, platform: &str, shortcut: &str) {
+/// 注册某个聚焦域快捷键（绑定到对应平台的处理函数）
+fn register_focus_shortcut(
+    app: &tauri::AppHandle,
+    kind: FocusShortcutKind,
+    platform: &str,
+    shortcut: &str,
+) {
     if shortcut.is_empty() {
         return;
     }
@@ -61,70 +94,98 @@ fn register_download_shortcut(app: &tauri::AppHandle, platform: &str, shortcut: 
             if event.state != ShortcutState::Pressed {
                 return;
             }
-            println!("[download] 快捷键触发 platform={}", p);
+            println!("[download] {} 快捷键触发 platform={}", kind.label(), p);
             let app = app_handle.clone();
             let p = p.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = download::download_current(app, p).await {
+                let res = match kind {
+                    FocusShortcutKind::Download => download::download_current(app, p).await,
+                    FocusShortcutKind::Image => download::download_current_image(app, p).await,
+                };
+                if let Err(e) = res {
                     eprintln!("[download] {}", e);
                 }
             });
         })
     {
-        eprintln!("[download] 注册下载快捷键 {} 失败: {}", shortcut, e);
+        eprintln!("[download] 注册{}快捷键 {} 失败: {}", kind.label(), shortcut, e);
         return;
     }
-    if let Ok(mut g) = DOWNLOAD_SHORTCUT.lock() {
+    if let Ok(mut g) = slot(kind).lock() {
         *g = Some((shortcut.to_string(), platform.to_string()));
     }
-    println!("[download] 已注册下载快捷键 {} → {}", shortcut, platform);
+    println!(
+        "[download] 已注册{}快捷键 {} → {}",
+        kind.label(),
+        shortcut,
+        platform
+    );
 }
 
-/// 注销下载快捷键（仅当当前注册的正是该平台时，避免窗口切换竞态误注销）
-fn unregister_download_shortcut(app: &tauri::AppHandle, platform: &str) {
-    let taken = DOWNLOAD_SHORTCUT.lock().ok().and_then(|mut g| {
+/// 注销指定槽位的快捷键（无关注销条件）
+fn clear_focus_shortcut(app: &tauri::AppHandle, kind: FocusShortcutKind) {
+    let taken = slot(kind).lock().ok().and_then(|mut g| g.take());
+    if let Some((sc, _)) = taken {
+        let _ = app.global_shortcut().unregister(sc.as_str());
+        println!("[download] 已注销{}快捷键 {}", kind.label(), sc);
+    }
+}
+
+/// 注销指定平台的快捷键（仅当当前注册的正是该平台时，避免窗口切换竞态误注销）
+fn unregister_focus_shortcut(
+    app: &tauri::AppHandle,
+    kind: FocusShortcutKind,
+    platform: &str,
+) {
+    let taken = slot(kind).lock().ok().and_then(|mut g| {
         let hit = g.as_ref().map(|(_, p)| p == platform).unwrap_or(false);
         if hit { g.take() } else { None }
     });
     if let Some((sc, _)) = taken {
         let _ = app.global_shortcut().unregister(sc.as_str());
-        println!("[download] 已注销下载快捷键 {}", sc);
+        println!("[download] 已注销{}快捷键 {}", kind.label(), sc);
     }
 }
 
-/// 用户在设置页改了下载快捷键后，按当前聚焦状态重新注册
-pub(crate) fn refresh_download_shortcut(app: &tauri::AppHandle) {
+/// 用户在设置页改了快捷键后，按当前聚焦状态重新注册（两个槽位一起处理）
+pub(crate) fn refresh_focus_shortcuts(app: &tauri::AppHandle) {
     let focused = focused_platform(app).map(|s| s.to_string());
-    // 先无条件清空现有注册
-    let taken = DOWNLOAD_SHORTCUT.lock().ok().and_then(|mut g| g.take());
-    if let Some((sc, _)) = taken {
-        let _ = app.global_shortcut().unregister(sc.as_str());
+    for k in [FocusShortcutKind::Download, FocusShortcutKind::Image] {
+        clear_focus_shortcut(app, k);
     }
     if let Some(p) = focused {
         let s = settings::load();
-        register_download_shortcut(app, &p, &s.download_shortcut);
+        register_focus_shortcut(app, FocusShortcutKind::Download, &p, &s.download_shortcut);
+        register_focus_shortcut(app, FocusShortcutKind::Image, &p, &s.image_shortcut);
     }
 }
 
-/// 平台窗口聚焦状态变化 → 注册 / 注销下载快捷键
+/// 平台窗口聚焦状态变化 → 注册 / 注销窗口内快捷键
 fn on_platform_focus(app: &tauri::AppHandle, platform: &str, focused: bool) {
+    let kinds = [FocusShortcutKind::Download, FocusShortcutKind::Image];
     if focused {
-        let already = DOWNLOAD_SHORTCUT
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|(_, p)| p.clone()));
-        if already.as_deref() == Some(platform) {
+        let all_ready = kinds.iter().all(|&k| {
+            slot(k)
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|(_, p)| p.clone()))
+                .as_deref()
+                == Some(platform)
+        });
+        if all_ready {
             return; // 已为该平台注册，无需重复
         }
         // 平台切换：先清掉旧的再注册新的
-        let taken = DOWNLOAD_SHORTCUT.lock().ok().and_then(|mut g| g.take());
-        if let Some((sc, _)) = taken {
-            let _ = app.global_shortcut().unregister(sc.as_str());
+        for k in kinds {
+            clear_focus_shortcut(app, k);
         }
         let s = settings::load();
-        register_download_shortcut(app, platform, &s.download_shortcut);
+        register_focus_shortcut(app, FocusShortcutKind::Download, platform, &s.download_shortcut);
+        register_focus_shortcut(app, FocusShortcutKind::Image, platform, &s.image_shortcut);
     } else {
-        unregister_download_shortcut(app, platform);
+        for k in kinds {
+            unregister_focus_shortcut(app, k, platform);
+        }
     }
 }
 
@@ -187,8 +248,10 @@ pub fn run() {
             settings::set_download_dir,
             settings::set_shortcut,
             settings::set_download_shortcut,
+            settings::set_image_shortcut,
             settings::set_dy_quality,
             download::download_current,
+            download::download_current_image,
             sidecar::sidecar_spawn,
             sidecar::sidecar_run_json,
             sidecar::sidecar_kill,

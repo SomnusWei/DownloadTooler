@@ -34,6 +34,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--note-json", required=True)
     ap.add_argument("--dir", required=True)
+    ap.add_argument("--image-src", action="append", default=[],
+                    help="当前页面显示的图片 URL 候选（可重复）；给出时只下载匹配到的那一张")
     args = ap.parse_args()
 
     try:
@@ -58,10 +60,12 @@ def main() -> int:
         out("[dl] 本地 cookies.json 缺失或为空，请先抓取一次（自动生成）或检查 Electron 登录")
         print(json.dumps({"ok": False, "err": "no-cookie"}, ensure_ascii=False)); return 3
 
-    out(f"[dl] {note.note_id} · {note.kind} · {note.title[:24]}")
+    out(f"[dl] {note.note_id} · {note.kind} · {note.title[:24]}"
+        + (f" · 当前图片（{len(args.image_src)} 个候选）" if args.image_src else ""))
     task = queue.TaskItem(note=note, meta=meta, target_dir=str(Path(args.dir)))
     try:
-        state, msg = service.run_download_task(task, header, log=out)
+        state, msg = service.run_download_task(task, header, log=out,
+                                               image_srcs=args.image_src)
     except LoginRequired as e:
         out(f"[dl] 登录失效：{e}")
         print("\n==XHS_JSON==\n" + json.dumps(

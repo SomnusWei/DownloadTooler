@@ -6,8 +6,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 type Platform = "dy" | "xhs";
 type Tab = "launch" | "login" | "settings" | "log";
-/// 快捷键录制目标：两个平台窗口启动键 + 窗口内下载键
-type ShortcutTarget = Platform | "download";
+/// 快捷键录制目标：两个平台窗口启动键 + 窗口内下载键 + 窗口内单图下载键
+type ShortcutTarget = Platform | "download" | "image";
 
 type CookieStatus = {
   window_open: boolean;
@@ -23,6 +23,7 @@ type Settings = {
   download_dir: string;
   shortcuts: { dy: string; xhs: string };
   download_shortcut: string;
+  image_shortcut: string;
   dy_quality: string;
 };
 
@@ -35,6 +36,7 @@ const settings = ref<Settings | null>(null);
 const dyShortcutInput = ref("");
 const xhsShortcutInput = ref("");
 const downloadShortcutInput = ref("");
+const imageShortcutInput = ref("");
 const dyQuality = ref("");
 const message = ref("");
 
@@ -116,6 +118,7 @@ async function loadSettings() {
     dyShortcutInput.value = s.shortcuts.dy;
     xhsShortcutInput.value = s.shortcuts.xhs;
     downloadShortcutInput.value = s.download_shortcut;
+    imageShortcutInput.value = s.image_shortcut;
     dyQuality.value = s.dy_quality;
   } catch (e) {
     console.error("[panel] 加载设置失败:", e);
@@ -174,6 +177,7 @@ function captureShortcut(e: KeyboardEvent, target: ShortcutTarget) {
   const combo = parts.join("+");
   if (target === "dy") dyShortcutInput.value = combo;
   else if (target === "xhs") xhsShortcutInput.value = combo;
+  else if (target === "image") imageShortcutInput.value = combo;
   else downloadShortcutInput.value = combo;
   message.value = `已捕获 ${target} 快捷键: ${combo}（点击"保存"生效）`;
 }
@@ -209,6 +213,19 @@ async function saveDownloadShortcut() {
     message.value = `✅ 下载快捷键已保存: ${s.download_shortcut || "(已禁用)"}`;
   } catch (e) {
     message.value = `❌ 下载快捷键保存失败: ${String(e)}`;
+  }
+}
+
+// 单图下载快捷键（仅图集当前图片；同样只在平台窗口聚焦时生效）
+async function saveImageShortcut() {
+  const v = imageShortcutInput.value.trim();
+  try {
+    const s = await invoke<Settings>("set_image_shortcut", { shortcut: v });
+    settings.value = s;
+    imageShortcutInput.value = s.image_shortcut;
+    message.value = `✅ 单图下载快捷键已保存: ${s.image_shortcut || "(已禁用)"}`;
+  } catch (e) {
+    message.value = `❌ 单图下载快捷键保存失败: ${String(e)}`;
   }
 }
 
@@ -403,6 +420,21 @@ onMounted(async () => {
           />
           <button @click="saveDownloadShortcut">保存</button>
           <button class="ghost" @click="downloadShortcutInput = 'Ctrl+D'">恢复默认</button>
+        </div>
+
+        <h3>单图下载快捷键（窗口内生效）</h3>
+        <p class="muted">仅下载图集里当前显示的那一张；只在平台窗口聚焦时生效，留空则禁用。默认 Alt+D。</p>
+        <div class="shortcut-row">
+          <label>单图</label>
+          <input
+            v-model="imageShortcutInput"
+            :placeholder="recording === 'image' ? '按下快捷键组合...' : '点击此处后按下组合键'"
+            @keydown="captureShortcut($event, 'image')"
+            @focus="onShortcutFocus('image')"
+            @blur="onShortcutBlur"
+          />
+          <button @click="saveImageShortcut">保存</button>
+          <button class="ghost" @click="imageShortcutInput = 'Alt+D'">恢复默认</button>
         </div>
       </div>
 
