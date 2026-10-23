@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tauri::AppHandle;
+use tauri::Manager;
 
 use crate::cookies;
 use crate::paths;
@@ -83,11 +84,23 @@ fn is_xhs_note(url: &str) -> bool {
     url.contains("/explore/") || url.contains("/discovery/item/")
 }
 
-/// 读取平台窗口当前页地址
-async fn current_url(platform: &str) -> Result<String, String> {
+/// 当前聚焦的平台窗口 URL（主窗口或站内新窗口），用于锁定 CDP target
+fn focused_window_url(app: &AppHandle, platform: &str) -> Option<String> {
+    let prefix = format!("{}_", platform);
+    app.webview_windows()
+        .into_iter()
+        .find(|(label, w)| {
+            label.starts_with(&prefix) && w.is_focused().unwrap_or(false)
+        })
+        .and_then(|(_, w)| w.url().ok())
+        .map(|u| u.to_string())
+}
+
+/// 读取平台窗口当前页地址（`hint` 用于锁定具体窗口：主窗口 / 站内新窗口）
+async fn current_url(platform: &str, hint: Option<&str>) -> Result<String, String> {
     let port = windows::cdp_port_for(platform)
         .ok_or_else(|| format!("未知 platform: {}", platform))?;
-    let v = cookies::cdp_eval_js(port, platform, "location.href")
+    let v = cookies::cdp_eval_js_in(port, platform, hint, "location.href")
         .await
         .map_err(|e| format!("读取当前页地址失败（窗口未打开或 CDP 不可达）: {}", e))?;
     Ok(v.as_str().unwrap_or("").to_string())
@@ -224,6 +237,8 @@ async fn download_dy(
     let dir = settings::download_dir();
     let _ = std::fs::create_dir_all(&dir);
     let cookie_file = paths::dy_cookie_file();
+    // toast 要落在用户正在看的窗口（主窗口或站内新窗口）
+    let hint = focused_window_url(app, "dy");
 
     let mut args: Vec<String> = vec![
         "--url".into(),
@@ -262,9 +277,10 @@ async fn download_dy(
             origin_url
         ),
     );
-    toast::push(
+    toast::push_in(
         port,
         "dy",
+        hint.as_deref(),
         "start",
         &match &image_srcs {
             Some(_) => "开始下载（当前图片）".to_string(),
@@ -280,6 +296,7 @@ async fn download_dy(
     let last = Arc::new(AtomicI64::new(-100));
     let gallery_cb = is_gallery.clone();
     let last_cb = last.clone();
+    let hint_cb = hint.clone();
     let on_line = move |line: &str| {
         if let Some((cur, total)) = parse_dy_image_progress(line) {
             if line.contains("失败") {
@@ -287,8 +304,9 @@ async fn download_dy(
             }
             gallery_cb.store(true, Ordering::Relaxed);
             let text = format!("下载中：图 {}/{}", cur, total);
+            let h = hint_cb.clone();
             tauri::async_runtime::spawn(async move {
-                toast::push(port, "dy", "progress", &text).await;
+                toast::push_in(port, "dy", h.as_deref(), "progress", &text).await;
             });
             return;
         }
@@ -305,8 +323,9 @@ async fn download_dy(
             return;
         }
         last_cb.store(pct, Ordering::Relaxed);
+        let h = hint_cb.clone();
         tauri::async_runtime::spawn(async move {
-            toast::push(port, "dy", "progress", &format!("下载中 {}%", pct)).await;
+            toast::push_in(port, "dy", h.as_deref(), "progress", &format!("下载中 {}%", pct)).await;
         });
     };
     let cb: &(dyn Fn(&str) + Send + Sync) = &on_line;
@@ -328,19 +347,19 @@ async fn download_dy(
                 } else {
                     format!("下载完成（{}）", kind_txt)
                 };
-                toast::push(port, "dy", "done", &done_txt).await;
+                toast::push_in(port, "dy", hint.as_deref(), "done", &done_txt).await;
             } else {
                 let why = v
                     .get("err")
                     .and_then(|e| e.as_str())
                     .unwrap_or("未知原因");
                 sidecar::emit_panel_log(app, "dy", format!("下载失败：{}", v));
-                toast::push(port, "dy", "failed", &format!("下载失败：{}", why)).await;
+                toast::push_in(port, "dy", hint.as_deref(), "failed", &format!("下载失败：{}", why)).await;
             }
         }
         Err(e) => {
             sidecar::emit_panel_log(app, "dy", format!("下载出错：{}", e));
-            toast::push(port, "dy", "failed", &format!("下载失败：{}", e)).await;
+            toast::push_in(port, "dy", hint.as_deref(), "failed", &format!("下载失败：{}", e)).await;
         }
     }
     res
@@ -349,8 +368,12 @@ async fn download_dy(
 /// 读取页面当前正在显示（最顶层）的图片 URL 候选（按可见面积降序）
 ///
 /// 不在页面里推断序号：序号由引擎拿详情图片列表做 URL 路径匹配得出。
-async fn visible_image_srcs(port: u16, platform: &str) -> Result<Vec<String>, String> {
-    let v = cookies::cdp_eval_js(port, platform, DOM_VISIBLE_IMAGE_JS)
+async fn visible_image_srcs(
+    port: u16,
+    platform: &str,
+    hint: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let v = cookies::cdp_eval_js_in(port, platform, hint, DOM_VISIBLE_IMAGE_JS)
         .await
         .map_err(|e| format!("读取当前图片失败（窗口未打开或 CDP 不可达）: {}", e))?;
     let srcs: Vec<String> = v
@@ -377,15 +400,17 @@ async fn download_current_dy(
 ) -> Result<Value, String> {
     let port = windows::cdp_port_for("dy")
         .ok_or_else(|| "dy CDP 端口未配置".to_string())?;
+    let hint = focused_window_url(app, "dy");
+    let hint_ref = hint.as_deref();
 
     // 与 Electron 一致：优先页面侧探测（视口中心 → 元素上溯），失败再退回当前 URL
-    let resolved = cookies::cdp_eval_js(port, "dy", DY_RESOLVE_JS)
+    let resolved = cookies::cdp_eval_js_in(port, "dy", hint_ref, DY_RESOLVE_JS)
         .await
         .map_err(|e| format!("读取抖音页面失败（窗口未打开或 CDP 不可达）: {}", e))?;
     let resolved = resolved.as_str().unwrap_or("").trim().to_string();
 
     let Some(engine_url) = dy_engine_url(&resolved) else {
-        let cur = cookies::cdp_eval_js(port, "dy", "location.href")
+        let cur = cookies::cdp_eval_js_in(port, "dy", hint_ref, "location.href")
             .await
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -396,14 +421,17 @@ async fn download_current_dy(
             cur
         );
         sidecar::emit_panel_log(app, "dy", &msg);
+        toast::push_in(port, "dy", hint_ref, "failed", "未识别到当前作品").await;
         return Err(msg);
     };
 
     match &image_srcs {
-        Some(_) => toast::push(port, "dy", "queued", "已加入下载：当前图片").await,
+        Some(_) => {
+            toast::push_in(port, "dy", hint_ref, "queued", "已加入下载：当前图片").await
+        }
         None => {
             let id = engine_url.rsplit('/').next().unwrap_or("").to_string();
-            toast::push(port, "dy", "queued", &format!("已加入下载：{}", id)).await;
+            toast::push_in(port, "dy", hint_ref, "queued", &format!("已加入下载：{}", id)).await
         }
     }
 
@@ -414,7 +442,8 @@ async fn download_current_dy(
 async fn download_current_image_dy(app: &AppHandle) -> Result<Value, String> {
     let port = windows::cdp_port_for("dy")
         .ok_or_else(|| "dy CDP 端口未配置".to_string())?;
-    match visible_image_srcs(port, "dy").await {
+    let hint = focused_window_url(app, "dy");
+    match visible_image_srcs(port, "dy", hint.as_deref()).await {
         Ok(srcs) => {
             sidecar::emit_panel_log(
                 app,
@@ -425,7 +454,7 @@ async fn download_current_image_dy(app: &AppHandle) -> Result<Value, String> {
         }
         Err(e) => {
             sidecar::emit_panel_log(app, "dy", &e);
-            toast::push(port, "dy", "failed", &e).await;
+            toast::push_in(port, "dy", hint.as_deref(), "failed", &e).await;
             Err(e)
         }
     }
@@ -448,10 +477,13 @@ async fn download_current_xhs(
     let port = windows::cdp_port_for("xhs")
         .ok_or_else(|| "xhs CDP 端口未配置".to_string())?;
 
-    let url = current_url("xhs").await?;
+    let hint = focused_window_url(app, "xhs");
+    let hint_ref = hint.as_deref();
+    let url = current_url("xhs", hint_ref).await?;
     if !is_xhs_note(&url) {
         let msg = format!("当前页不是小红书笔记页，已忽略：{}", url);
         sidecar::emit_panel_log(app, "xhs", &msg);
+        toast::push_in(port, "xhs", hint_ref, "failed", "当前页不是笔记页").await;
         return Err(msg);
     }
 
@@ -466,7 +498,7 @@ async fn download_current_xhs(
             .unwrap_or("未知原因");
         let msg = format!("解析笔记失败：{}", why);
         sidecar::emit_panel_log(app, "xhs", &msg);
-        toast::push(port, "xhs", "failed", &format!("下载失败：{}", why)).await;
+        toast::push_in(port, "xhs", hint_ref, "failed", &format!("下载失败：{}", why)).await;
         return Err(msg);
     }
 
@@ -484,8 +516,12 @@ async fn download_current_xhs(
         .to_string();
     let id_txt = if note_id.is_empty() { "笔记".to_string() } else { note_id.clone() };
     match &image_srcs {
-        Some(_) => toast::push(port, "xhs", "queued", "已加入下载：当前图片").await,
-        None => toast::push(port, "xhs", "queued", &format!("已加入下载：{}", id_txt)).await,
+        Some(_) => {
+            toast::push_in(port, "xhs", hint_ref, "queued", "已加入下载：当前图片").await
+        }
+        None => {
+            toast::push_in(port, "xhs", hint_ref, "queued", &format!("已加入下载：{}", id_txt)).await
+        }
     }
 
     // ② 写临时 note-json（download_one 的入参格式：{meta, note}）
@@ -524,9 +560,10 @@ async fn download_current_xhs(
             }
         ),
     );
-    toast::push(
+    toast::push_in(
         port,
         "xhs",
+        hint_ref,
         "start",
         &match &image_srcs {
             Some(_) => "开始下载（当前图片）".to_string(),
@@ -540,6 +577,7 @@ async fn download_current_xhs(
     // XHS 引擎没有百分比输出，只有文件级进度行 `[<note_id>] <文件显示名>`
     // （如 `[abc] 图 3` / `[abc] 视频`），据此推送「下载中：…」进度 toast。
     let prefix = format!("[{}] ", note_id);
+    let hint_cb = hint.clone();
     let on_line = move |line: &str| {
         let Some(disp) = line.strip_prefix(prefix.as_str()) else {
             return;
@@ -549,8 +587,9 @@ async fn download_current_xhs(
             return;
         }
         let text = format!("下载中：{}", disp);
+        let h = hint_cb.clone();
         tauri::async_runtime::spawn(async move {
-            toast::push(port, "xhs", "progress", &text).await;
+            toast::push_in(port, "xhs", h.as_deref(), "progress", &text).await;
         });
     };
     let cb: &(dyn Fn(&str) + Send + Sync) = &on_line;
@@ -576,7 +615,7 @@ async fn download_current_xhs(
                 } else {
                     "下载完成（笔记）".to_string()
                 };
-                toast::push(port, "xhs", "done", &done_txt).await;
+                toast::push_in(port, "xhs", hint_ref, "done", &done_txt).await;
             } else {
                 let why = v
                     .get("msg")
@@ -584,12 +623,12 @@ async fn download_current_xhs(
                     .and_then(|e| e.as_str())
                     .unwrap_or("未知原因");
                 sidecar::emit_panel_log(app, "xhs", format!("下载失败：{}", v));
-                toast::push(port, "xhs", "failed", &format!("下载失败：{}", why)).await;
+                toast::push_in(port, "xhs", hint_ref, "failed", &format!("下载失败：{}", why)).await;
             }
         }
         Err(e) => {
             sidecar::emit_panel_log(app, "xhs", format!("下载出错：{}", e));
-            toast::push(port, "xhs", "failed", &format!("下载失败：{}", e)).await;
+            toast::push_in(port, "xhs", hint_ref, "failed", &format!("下载失败：{}", e)).await;
         }
     }
     res
@@ -599,7 +638,8 @@ async fn download_current_xhs(
 async fn download_current_image_xhs(app: &AppHandle) -> Result<Value, String> {
     let port = windows::cdp_port_for("xhs")
         .ok_or_else(|| "xhs CDP 端口未配置".to_string())?;
-    match visible_image_srcs(port, "xhs").await {
+    let hint = focused_window_url(app, "xhs");
+    match visible_image_srcs(port, "xhs", hint.as_deref()).await {
         Ok(srcs) => {
             sidecar::emit_panel_log(
                 app,
@@ -610,7 +650,7 @@ async fn download_current_image_xhs(app: &AppHandle) -> Result<Value, String> {
         }
         Err(e) => {
             sidecar::emit_panel_log(app, "xhs", &e);
-            toast::push(port, "xhs", "failed", &e).await;
+            toast::push_in(port, "xhs", hint.as_deref(), "failed", &e).await;
             Err(e)
         }
     }

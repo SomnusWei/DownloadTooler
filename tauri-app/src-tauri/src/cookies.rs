@@ -94,7 +94,12 @@ fn url_substr_for_platform(platform: &str) -> Option<&'static str> {
 
 /// HTTP GET /json 拿 page target id 和 webSocketDebuggerUrl
 /// 若指定 platform，则按 URL 子串过滤定位该平台的 page target
-async fn fetch_target(port: u16, platform: Option<&str>) -> Result<(String, String), String> {
+/// `url_hint` 非空时优先精确命中该 URL 的 target（区分主窗口与站内新窗口）
+async fn fetch_target(
+    port: u16,
+    platform: Option<&str>,
+    url_hint: Option<&str>,
+) -> Result<(String, String), String> {
     let url = format!("http://127.0.0.1:{}/json", port);
     let resp = reqwest::get(&url)
         .await
@@ -118,31 +123,82 @@ async fn fetch_target(port: u16, platform: Option<&str>) -> Result<(String, Stri
         );
     }
     let url_substr = platform.and_then(url_substr_for_platform);
-    let target = targets
-        .into_iter()
+    let candidates: Vec<&TargetInfo> = targets
+        .iter()
         .filter(|t| t.target_type == "page")
         .filter(|t| t.web_socket_debugger_url.is_some())
-        .find(|t| {
-            match url_substr {
-                // 按 URL 子串过滤定位平台 page
-                Some(s) => t.url.contains(s),
-                // 未指定 platform → 任意 page
-                None => true,
-            }
+        .filter(|t| match url_substr {
+            // 按 URL 子串过滤定位平台 page
+            Some(s) => t.url.contains(s),
+            // 未指定 platform → 任意 page
+            None => true,
         })
+        .collect();
+
+    // 站内新窗口（弹窗）与主窗口共用同一 CDP 端口，/json 里会有多个 page target。
+    // ① 有窗口 URL 提示时，优先精确命中该 target（主窗口 / 弹窗各自独立）；
+    // ② 否则用首次记住的主窗口 target id；
+    // ③ 再兜底第一个候选。
+    let hinted = url_hint.and_then(|hint| {
+        let hint = hint.trim_end_matches('/');
+        candidates
+            .iter()
+            .find(|t| t.url.trim_end_matches('/') == hint)
+            .or_else(|| candidates.iter().find(|t| t.url.starts_with(hint)))
+            .copied()
+    });
+    // 窗口 URL 没命中 target（地址略有差异 / 页面刚跳转）时会回退主窗口，
+    // 打印出来便于排查「弹窗里下载到了主窗口页面」这类问题
+    if url_hint.is_some() && hinted.is_none() {
+        eprintln!(
+            "[cookies] 窗口 URL 未命中 target，回退主窗口: hint={:?} candidates={:?}",
+            url_hint,
+            candidates.iter().map(|t| t.url.as_str()).collect::<Vec<_>>()
+        );
+    }
+    let remembered = platform.and_then(|p| {
+        main_targets().lock().ok().and_then(|m| m.get(p).cloned())
+    });
+    let target = hinted
+        .or_else(|| {
+            remembered
+                .as_ref()
+                .and_then(|id| candidates.iter().find(|t| &t.id == id).copied())
+        })
+        .or_else(|| candidates.first().copied())
         .ok_or_else(|| {
             match platform {
                 Some(p) => format!("未找到 {} 的 page target（URL 未匹配 {}）", p, url_substr_for_platform(p).unwrap_or("?")),
                 None => "未找到可用 target".to_string(),
             }
         })?;
-    let ws_url = target.web_socket_debugger_url.unwrap();
-    Ok((target.id, ws_url))
+
+    // 只有未指定窗口提示时才更新「主窗口」记忆，避免弹窗覆盖主窗口 id
+    if url_hint.is_none() {
+        if let Some(p) = platform {
+            if let Ok(mut m) = main_targets().lock() {
+                m.insert(p.to_string(), target.id.clone());
+            }
+        }
+    }
+
+    let ws_url = target
+        .web_socket_debugger_url
+        .clone()
+        .ok_or_else(|| "target 缺少 webSocketDebuggerUrl".to_string())?;
+    Ok((target.id.clone(), ws_url))
+}
+
+/// 主窗口 target id 记忆表（platform → target id），进程内缓存
+fn main_targets() -> &'static std::sync::Mutex<HashMap<String, String>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 /// 通过 CDP WebSocket 调 Network.getAllCookies（指定 platform 以按 URL 过滤 target）
 pub async fn cdp_get_all_cookies(port: u16, platform: &str) -> Result<Vec<Cookie>, String> {
-    let (_target_id, ws_url) = fetch_target(port, Some(platform)).await?;
+    let (_target_id, ws_url) = fetch_target(port, Some(platform), None).await?;
     let (mut ws, _) = connect_async(&ws_url)
         .await
         .map_err(|e| format!("WebSocket 连接失败: {}", e))?;
@@ -294,7 +350,18 @@ pub async fn verify_login(platform: String) -> Result<Value, String> {
 
 /// 通过 CDP Runtime.evaluate 执行 JS（returnByValue + awaitPromise）
 pub(crate) async fn cdp_eval_js(port: u16, platform: &str, js: &str) -> Result<Value, String> {
-    let (_target_id, ws_url) = fetch_target(port, Some(platform)).await?;
+    cdp_eval_js_in(port, platform, None, js).await
+}
+
+/// 同上，但用 `url_hint`（聚焦窗口 URL）锁定具体 page target，
+/// 避免主窗口与站内新窗口共用 CDP 端口时读错页面。
+pub(crate) async fn cdp_eval_js_in(
+    port: u16,
+    platform: &str,
+    url_hint: Option<&str>,
+    js: &str,
+) -> Result<Value, String> {
+    let (_target_id, ws_url) = fetch_target(port, Some(platform), url_hint).await?;
     let (mut ws, _) = connect_async(&ws_url)
         .await
         .map_err(|e| format!("WebSocket 连接失败: {}", e))?;

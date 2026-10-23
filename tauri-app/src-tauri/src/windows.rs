@@ -56,16 +56,137 @@ pub async fn open_platform_window(
     let args = format!("--remote-debugging-port={} --remote-allow-origins=*", cdp_port);
     let url = WebviewUrl::External(home_url.parse().map_err(|e| format!("URL 解析失败: {}", e))?);
 
+    // WebView2 默认对 target=_blank / window.open 的新窗口请求「标记为已处理但不创建窗口」，
+    // 页面表现为点击无反应。这里显式接管：站内链接新建受管窗口（共享同一 WebView2 环境，
+    // 登录态不丢），站外链接交给系统浏览器。
+    let popup_app = app.clone();
+    let popup_platform = platform.clone();
+
     WebviewWindowBuilder::new(&app, label, url)
         .additional_browser_args(&args)
         .data_directory(data_dir)
         .title(title)
         .inner_size(1280.0, 800.0)
         .position(pos.0, pos.1)
+        .initialization_script(NEW_WINDOW_CLICK_JS)
+        .on_new_window(move |url, features| {
+            open_managed_popup(&popup_app, &popup_platform, url, features)
+        })
         .build()
         .map_err(|e| format!("创建 {} 窗口失败: {}", label, e))?;
 
     Ok(format!("{} 已创建，CDP 端口 {}", label, cdp_port))
+}
+
+/// 站内链接新窗口统一处理（主窗口与弹窗共用）
+///
+/// 弹窗内再次点击 `target=_blank` 链接时同样要走这里，否则新弹窗
+/// 的 webview 没有 `on_new_window` 处理器，点击又会静默失效。
+fn open_managed_popup(
+    app: &tauri::AppHandle,
+    platform: &str,
+    url: tauri::Url,
+    features: tauri::webview::NewWindowFeatures,
+) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+    println!("[windows] new-window: {} ({})", url, platform);
+    if !is_platform_host(platform, &url) {
+        // 站外链接（含 http/https）交系统浏览器，避免在应用内打开无关站点
+        if matches!(url.scheme(), "http" | "https") {
+            open_in_system_browser(&url);
+        }
+        return tauri::webview::NewWindowResponse::Deny;
+    }
+    let label = next_popup_label(app, platform);
+    let name = if platform == "dy" { "抖音" } else { "小红书" };
+    let next_app = app.clone();
+    let next_platform = platform.to_string();
+    match WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+        .inner_size(1024.0, 720.0)
+        // Windows 上 Create 必须复用 opener 的 WebView2 环境（含调试端口）
+        .window_features(features)
+        .title(format!("DownloadTooler - {} · 新窗口", name))
+        .initialization_script(NEW_WINDOW_CLICK_JS)
+        .on_new_window(move |url, features| {
+            open_managed_popup(&next_app, &next_platform, url, features)
+        })
+        .build()
+    {
+        Ok(window) => {
+            // WebView2 建窗后不一定把窗口激活；不主动聚焦的话窗口收不到焦点事件，
+            // 聚焦域快捷键就不会注册（表现为弹窗里按快捷键没反应）
+            let _ = window.set_focus();
+            tauri::webview::NewWindowResponse::Create { window }
+        }
+        Err(e) => {
+            eprintln!("[windows] 新建站内窗口失败: {}", e);
+            tauri::webview::NewWindowResponse::Deny
+        }
+    }
+}
+
+/// 页面注入：把 `a[target=_blank]` 的点击改走 `window.open`
+///
+/// WebView2 对锚点的默认新窗口行为会被 wry 直接吞掉（`SetHandled(true)` 但不建窗口），
+/// 表现为“点击无反应”；而 `window.open` 通路经 `on_new_window` 已验证可正常建窗。
+/// 因此在 document-start 阶段捕获点击，统一改走 `window.open`。
+const NEW_WINDOW_CLICK_JS: &str = r#"(function(){
+  if (window.__dtNewWindowHooked) return;
+  window.__dtNewWindowHooked = true;
+  document.addEventListener('click', function(e){
+    var t = e.target;
+    if (!t || !t.closest) return;
+    var a = t.closest('a[target="_blank"]');
+    if (!a) return;
+    var href = a.href || a.getAttribute('href') || '';
+    if (!/^https?:/i.test(href)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    try { window.open(href, '_blank'); } catch (err) {}
+  }, true);
+})()"#;
+
+/// 站内域名判定：仅这些主机的链接才在应用内新开窗口，其余交给系统浏览器
+fn is_platform_host(platform: &str, url: &tauri::Url) -> bool {
+    let Some(host) = url.host_str() else { return false };
+    let host = host.to_ascii_lowercase();
+    match platform {
+        "dy" => {
+            host == "douyin.com"
+                || host.ends_with(".douyin.com")
+                || host.ends_with(".iesdouyin.com")
+        }
+        "xhs" => host == "xiaohongshu.com" || host.ends_with(".xiaohongshu.com"),
+        _ => false,
+    }
+}
+
+/// 弹窗窗口 label：`dy_pop_1`、`dy_pop_2`…（窗口关闭后编号可复用）
+fn next_popup_label(app: &tauri::AppHandle, platform: &str) -> String {
+    for i in 1..=50 {
+        let label = format!("{}_pop_{}", platform, i);
+        if app.get_webview_window(&label).is_none() {
+            return label;
+        }
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{}_pop_{}", platform, ts)
+}
+
+/// 站外链接用系统默认浏览器打开（仅 Windows：本项目依赖 WebView2）
+fn open_in_system_browser(url: &tauri::Url) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url.as_str()])
+            .spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = url;
+    }
 }
 
 fn ensure_dir(p: &PathBuf) -> std::io::Result<()> {

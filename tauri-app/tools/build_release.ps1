@@ -8,7 +8,7 @@
 #   powershell -ExecutionPolicy Bypass -File tools\build_release.ps1
 #   powershell -ExecutionPolicy Bypass -File tools\build_release.ps1 -SkipBuild
 param(
-  [string]$Version = "0.3.0",
+  [string]$Version = "0.3.1",
   [switch]$SkipBuild
 )
 

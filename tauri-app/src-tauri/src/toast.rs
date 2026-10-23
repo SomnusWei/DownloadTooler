@@ -120,14 +120,23 @@ const HOST_JS: &str = r#"(function(){
 })()"#;
 
 /// 向平台窗口右下角推送一条 toast（失败只记日志，不影响主流程）
-pub async fn push(port: u16, platform: &str, kind: &str, text: &str) {
+///
+/// `hint` 为窗口 URL：站内新窗口（弹窗）聚焦时提示要落在弹窗自己身上，
+/// 为空则落在该平台的主窗口。
+pub async fn push_in(
+    port: u16,
+    platform: &str,
+    hint: Option<&str>,
+    kind: &str,
+    text: &str,
+) {
     let js = format!(
         "{}\n;(function(){{ try{{ window.__dtToast({}, {}); }}catch(e){{}} return true; }})()",
         HOST_JS,
         json!(kind),
         json!(text)
     );
-    if let Err(e) = cookies::cdp_eval_js(port, platform, &js).await {
+    if let Err(e) = cookies::cdp_eval_js_in(port, platform, hint, &js).await {
         eprintln!("[toast] 推送失败({}/{}): {}", platform, kind, e);
     }
 }

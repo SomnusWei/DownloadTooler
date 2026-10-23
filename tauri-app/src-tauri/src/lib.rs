@@ -65,11 +65,22 @@ fn slot(kind: FocusShortcutKind) -> &'static ShortcutSlot {
     }
 }
 
-/// 找出当前处于聚焦状态的平台窗口
+/// 窗口 label → 平台：主窗口（`dy_main`）与站内新窗口（`dy_pop_1`…）归属同一平台
+pub(crate) fn platform_of_label(label: &str) -> Option<&'static str> {
+    if label.starts_with("dy_") {
+        Some("dy")
+    } else if label.starts_with("xhs_") {
+        Some("xhs")
+    } else {
+        None
+    }
+}
+
+/// 找出当前处于聚焦状态的平台窗口（含站内新窗口）
 fn focused_platform(app: &tauri::AppHandle) -> Option<&'static str> {
-    for (label, platform) in [("dy_main", "dy"), ("xhs_main", "xhs")] {
-        if let Some(w) = app.get_webview_window(label) {
-            if w.is_focused().unwrap_or(false) {
+    for (label, w) in app.webview_windows() {
+        if w.is_focused().unwrap_or(false) {
+            if let Some(platform) = platform_of_label(&label) {
                 return Some(platform);
             }
         }
@@ -131,22 +142,6 @@ fn clear_focus_shortcut(app: &tauri::AppHandle, kind: FocusShortcutKind) {
     }
 }
 
-/// 注销指定平台的快捷键（仅当当前注册的正是该平台时，避免窗口切换竞态误注销）
-fn unregister_focus_shortcut(
-    app: &tauri::AppHandle,
-    kind: FocusShortcutKind,
-    platform: &str,
-) {
-    let taken = slot(kind).lock().ok().and_then(|mut g| {
-        let hit = g.as_ref().map(|(_, p)| p == platform).unwrap_or(false);
-        if hit { g.take() } else { None }
-    });
-    if let Some((sc, _)) = taken {
-        let _ = app.global_shortcut().unregister(sc.as_str());
-        println!("[download] 已注销{}快捷键 {}", kind.label(), sc);
-    }
-}
-
 /// 用户在设置页改了快捷键后，按当前聚焦状态重新注册（两个槽位一起处理）
 pub(crate) fn refresh_focus_shortcuts(app: &tauri::AppHandle) {
     let focused = focused_platform(app).map(|s| s.to_string());
@@ -160,33 +155,47 @@ pub(crate) fn refresh_focus_shortcuts(app: &tauri::AppHandle) {
     }
 }
 
-/// 平台窗口聚焦状态变化 → 注册 / 注销窗口内快捷键
-fn on_platform_focus(app: &tauri::AppHandle, platform: &str, focused: bool) {
+/// 按「当前实际聚焦的窗口」对齐两个快捷键槽位
+///
+/// 不能据单次事件直接注销：主窗口与站内新窗口同属一个平台，
+/// 新窗口打开时「新窗口聚焦」可能早于「主窗口失焦」到达，
+/// 若失焦时直接注销，弹窗内就再也收不到快捷键（表现为完全无效）。
+/// 因此每次焦点变化都重新扫描全部平台窗口，确认没有任何同平台窗口
+/// 处于聚焦状态时才注销。
+fn sync_focus_shortcuts(app: &tauri::AppHandle) {
+    let focused = focused_platform(app).map(|s| s.to_string());
     let kinds = [FocusShortcutKind::Download, FocusShortcutKind::Image];
-    if focused {
-        let all_ready = kinds.iter().all(|&k| {
-            slot(k)
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().map(|(_, p)| p.clone()))
-                .as_deref()
-                == Some(platform)
-        });
-        if all_ready {
-            return; // 已为该平台注册，无需重复
-        }
-        // 平台切换：先清掉旧的再注册新的
-        for k in kinds {
-            clear_focus_shortcut(app, k);
-        }
-        let s = settings::load();
-        register_focus_shortcut(app, FocusShortcutKind::Download, platform, &s.download_shortcut);
-        register_focus_shortcut(app, FocusShortcutKind::Image, platform, &s.image_shortcut);
-    } else {
-        for k in kinds {
-            unregister_focus_shortcut(app, k, platform);
-        }
+    let registered = |k: FocusShortcutKind| {
+        slot(k)
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|(_, p)| p.clone()))
+    };
+    let ready = match focused.as_deref() {
+        Some(p) => kinds.iter().all(|&k| registered(k).as_deref() == Some(p)),
+        None => kinds.iter().all(|&k| registered(k).is_none()),
+    };
+    if ready {
+        return;
     }
+    for k in kinds {
+        clear_focus_shortcut(app, k);
+    }
+    if let Some(p) = focused {
+        let s = settings::load();
+        register_focus_shortcut(app, FocusShortcutKind::Download, &p, &s.download_shortcut);
+        register_focus_shortcut(app, FocusShortcutKind::Image, &p, &s.image_shortcut);
+    }
+}
+
+/// 焦点变化后延迟再对齐一次：新窗口的激活事件可能晚于旧窗口的失焦事件
+/// （`is_focused` 在这几毫秒内还查不到新窗口），立即判定会误注销快捷键。
+fn schedule_focus_sync(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        sync_focus_shortcuts(&app);
+    });
 }
 
 /// 注册单个 platform 的全局快捷键 + 绑定特定 handler
@@ -354,13 +363,25 @@ pub fn run() {
                 }
             }
             WindowEvent::Focused(focused) => {
-                // 平台窗口获得焦点 → 注册下载快捷键；失焦 → 注销（窗口内生效语义）
-                let platform = match window.label() {
-                    "dy_main" => "dy",
-                    "xhs_main" => "xhs",
-                    _ => return,
+                // 任一平台窗口（主窗口 / 站内新窗口）焦点变化 → 重新对齐快捷键槽位
+                let label = window.label();
+                let Some(platform) = platform_of_label(label) else {
+                    return;
                 };
-                on_platform_focus(window.app_handle(), platform, *focused);
+                let active: Vec<String> = window
+                    .app_handle()
+                    .webview_windows()
+                    .into_iter()
+                    .filter(|(_, w)| w.is_focused().unwrap_or(false))
+                    .map(|(l, _)| l)
+                    .collect();
+                println!(
+                    "[focus] {} focused={} platform={} 聚焦窗口={:?}",
+                    label, focused, platform, active
+                );
+                sync_focus_shortcuts(window.app_handle());
+                // 新窗口激活可能晚于旧窗口失焦，立即判定会把快捷键误注销
+                schedule_focus_sync(window.app_handle());
             }
             _ => {}
         })

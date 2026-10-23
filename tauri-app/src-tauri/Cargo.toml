@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "0.3.0"
+version = "0.3.1"
 description = "DownloadTooler - Tauri 2.0 单一桌面端（抖音 + 小红书）"
 authors = ["DownloadTooler"]
 edition = "2021"

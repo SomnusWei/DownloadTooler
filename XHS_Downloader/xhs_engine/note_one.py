@@ -35,6 +35,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--href", default="", help="笔记卡片链接；留空=取左侧当前页")
     args = ap.parse_args()
+    href = args.href.strip()
 
     from DrissionPage import Chromium, ChromiumOptions
     co = (ChromiumOptions().set_address(f"127.0.0.1:{PORT}")
@@ -46,7 +47,16 @@ def main() -> int:
             browser = Chromium(co)                       # 浏览器级连接，不自动挂页
             hits = browser.get_tabs(url="xiaohongshu.com")
             if hits:
-                tab = hits[0]
+                # 主窗口与站内新窗口并存时，优先挂接与目标链接同路径的 tab：
+                # 解析兜底会让该 tab 亲自打开直链，必须落在用户正在看的窗口
+                picked = None
+                if href:
+                    want = href.split("?")[0].rstrip("/")
+                    for t in hits:
+                        if (t.url or "").split("?")[0].rstrip("/") == want:
+                            picked = t
+                            break
+                tab = picked or hits[0]
                 try:
                     browser.activate_tab(tab)
                 except Exception:
@@ -61,7 +71,6 @@ def main() -> int:
         out("[one] 无法连上小红书页面，请确认左侧浏览器已打开小红书后重试")
         print(json.dumps({"ok": False, "err": "no-xhs-tab"}, ensure_ascii=False)); return 3
 
-    href = args.href.strip()
     try:
         meta, note = service.single_note_from_current(tab, hint_url=href)
     except Exception as e:

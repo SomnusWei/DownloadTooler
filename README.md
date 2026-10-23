@@ -2,7 +2,7 @@
 
 个人自用的 Windows 桌面下载工具（**Tauri 2.0** 单一应用）：内置**原生站点窗口**浏览抖音 / 小红书，在**窗口内按快捷键**即可下载**当前正在看的作品 / 笔记**，用于备份自己收藏或已获授权的公开内容。
 
-> v0.3.0 起桌面端由 Electron 迁移到 Tauri 2.0，**不再提供 Vue 面板**：平台窗口就是完整站点页面，交互只剩下载快捷键（`Ctrl+D` 全量 / `Alt+D` 单图）与一个配置中心窗口。
+> v0.3.1 起桌面端由 Electron 迁移到 Tauri 2.0，**不再提供 Vue 面板**：平台窗口就是完整站点页面，交互只剩下载快捷键（`Ctrl+D` 全量 / `Alt+D` 单图）与一个配置中心窗口。v0.3.1 新增**站内链接新窗口**（作者卡片 / 昵称等点击后不再失效）。
 
 ## 功能一览
 
@@ -10,6 +10,7 @@
 | --- | --- |
 | 单应用启动 | 启动只有「配置中心」一个窗口（4 标签：启动 / 登录态 / 设置 / 日志） |
 | 按需拉起平台窗口 | 点击按钮打开 `dy_main` / `xhs_main`；已打开则聚焦，不重复创建 |
+| 站内链接新窗口 | 在平台窗口内点开站内链接（抖音搜索结果作者卡片、小红书作者昵称等）会在应用内新建受管窗口，**共享登录态**；新窗口内同样支持 `Ctrl+D` / `Alt+D`，下载读取的是**当前聚焦窗口**的页面；站外链接交系统浏览器打开 |
 | **窗口内下载快捷键** | 默认 `Ctrl+D`：下载**当前显示**的作品 / 笔记；仅在对应窗口聚焦时生效，不影响其他应用的 Ctrl+D |
 | **窗口内单图下载快捷键** | 默认 `Alt+D`：只下载**图集里当前显示的那一张**（视频笔记或非图集页面会提示不适用）；同样仅在平台窗口聚焦时生效 |
 | 窗口切换快捷键 | 默认 `Alt+1` 抖音 / `Alt+2` 小红书（系统级，托盘状态下也生效）：未启动→启动；已启动未聚焦→聚焦；已聚焦→最小化 |
@@ -44,7 +45,9 @@
 - **抖音当前作品识别**：前台多用 **modal 弹窗**展示作品（URL 只有 `modal_id`），因此不能只看 URL —— 采用**视口中心 DOM 探测**（元素上溯 14 层找作品链接或 `data-*` 里的长数字 id），URL 仅作兜底。
 - **小红书必须带 `xsec_token`**：解析笔记 SSR 依赖当前页 URL 的 `xsec_token`，故传参保留完整查询串。
 - **单图识别（`Alt+D`）**：抖音 / 小红书的图集容器结构完全不同且经常变动，因此**不在 DOM 里数序号** —— 用 `elementFromPoint` 取**最顶层可见图片**的 URL 候选（按面积降序，最多 6 个），交给引擎与作品详情图片列表做**资源哈希匹配**（忽略 CDN 域名与 `~` / `!` 缩放后缀），命中后只下载那一张（`--image-src`）。
-- **窗口内快捷键的实现**：只依赖聚焦状态 —— 平台窗口获得焦点时注册 `Ctrl+D` / `Alt+D`，失焦即注销（Tauri v2 默认禁止远程站点页面调用 IPC，故不走页面内注入）。
+- **窗口内快捷键的实现**：只依赖聚焦状态 —— 任一平台窗口（主窗口**或站内新窗口**）获得焦点时注册 `Ctrl+D` / `Alt+D`，全部平台窗口失焦才注销（Tauri v2 默认禁止远程站点页面调用 IPC，故不走页面内注入）。焦点事件后延迟 350ms 再复核一次，避免「新窗口激活晚于旧窗口失焦」导致快捷键被误注销。
+- **新窗口接管**：WebView2 默认把 `target=_blank` 的请求标记为已处理但不建窗（页面表现为点击无反应）。应用侧注册 `on_new_window`，站内链接用 `window_features` 复用同一 WebView2 环境新建窗口（登录态不丢），站外链接交系统浏览器；document-start 注入脚本把 `a[target=_blank]` 的点击改走 `window.open`，覆盖锚点默认行为被吞掉的情况。
+- **CDP target 选取**：主窗口与新窗口共用同一调试端口，`/json` 会出现多个 page target。下载时按**当前聚焦窗口的 URL**（`WebviewWindow::url()`）精确匹配 target，避免新窗口里下载到主窗口的页面。
 - **CDP 端口隔离**：dy_main / xhs_main 各自独立 `UserDataFolder` 与 `--remote-debugging-port`，两平台可**并发下载**互不干扰。
 
 ## 目录结构
@@ -100,16 +103,16 @@ npm run tauri dev
 
 ```powershell
 cd tauri-app
-powershell -ExecutionPolicy Bypass -File tools\build_release.ps1 -Version 0.3.0
+powershell -ExecutionPolicy Bypass -File tools\build_release.ps1 -Version 0.3.1
 ```
 
 产物：
 
 | 形态 | 路径 | 体积 |
 | --- | --- | --- |
-| MSI 安装包 | `src-tauri/target/release/bundle/msi/` | ~23 MB |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/` | ~17 MB |
-| 便携包 | `build/release/DownloadTooler-v<版本>-portable.zip` | ~31 MB（解压后 ~63 MB） |
+| MSI 安装包 | `src-tauri/target/release/bundle/msi/` | ~22.6 MB |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/` | ~17.3 MB |
+| 便携包 | `build/release/DownloadTooler-v<版本>-portable.zip` | ~30.5 MB（解压后 ~62.7 MB） |
 
 便携版解压后运行 `DownloadTooler.exe`，需与 `engines/` 同目录。
 
